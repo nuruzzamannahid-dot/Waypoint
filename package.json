@@ -1,0 +1,21 @@
+{
+  "name": "waypoint-crm",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Waypoint — New Merchant CRM (Node/Express + Turso, deployed on Render)",
+  "scripts": {
+    "start": "node server.js",
+    "hash-password": "node scripts/hash-password.js"
+  },
+  "dependencies": {
+    "@libsql/client": "^0.14.0",
+    "bcryptjs": "^2.4.3",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
