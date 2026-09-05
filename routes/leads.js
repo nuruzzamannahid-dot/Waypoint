@@ -4,6 +4,38 @@ import { rowToLead, rowToActivity } from "../lib/mappers.js";
 
 const router = Router();
 
+// Same pipeline order as the frontend's STAGES const (public/index.html) —
+// used to move a lead's stage forward when an activity outcome implies
+// progress, and to make sure we only ever move forward, never backward.
+const STAGE_ORDER = [
+  "New Lead", "Assigned", "Contacted", "Connected", "Qualified", "Interested",
+  "Rate/Proposal Shared", "Negotiation", "Trial/First Booking", "Converted",
+];
+const NON_ADVANCING_STAGES = ["Lost", "Unresponsive", "Converted"]; // never auto-move out of these
+
+// Activity outcome -> the stage that outcome implies the lead has reached.
+const OUTCOME_STAGE = {
+  "Connected": "Connected",
+  "Interested": "Interested",
+  "No Response": "Contacted",
+  "Rate Shared": "Rate/Proposal Shared",
+  "Objection Raised": "Negotiation",
+};
+
+// Given a lead's current stage and a logged activity outcome, return the
+// stage the lead should move to (or null if it shouldn't change). Only ever
+// advances the pipeline line — it never demotes a lead that's already
+// further along, and never touches a closed-out lead.
+function stageForOutcome(currentStage, outcome) {
+  const target = OUTCOME_STAGE[outcome];
+  if (!target) return null;
+  if (NON_ADVANCING_STAGES.includes(currentStage)) return null;
+  const curIdx = STAGE_ORDER.indexOf(currentStage);
+  const targetIdx = STAGE_ORDER.indexOf(target);
+  if (targetIdx <= curIdx) return null;
+  return target;
+}
+
 function todayStr() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -27,13 +59,17 @@ router.post("/", async (req, res) => {
   }
   const id = await nextLeadId();
   const today = todayStr();
+  // A lead created with an AD manager already picked is, by definition, past
+  // "New Lead" — start it at "Assigned" so the pipeline line matches reality
+  // instead of requiring a manual bump.
+  const startStage = (b.manager || "").trim() ? "Assigned" : "New Lead";
 
   await db.execute({
     sql: `INSERT INTO leads (
       id, business, contact, phone, alt_phone, fb, website, type, category,
       location, source, manager, lead_date, courier, pain, cur_orders,
       exp_orders, stage, next_followup, created_by
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'New Lead', ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [
       id,
       b.business.trim(),
@@ -52,6 +88,7 @@ router.post("/", async (req, res) => {
       b.pain || "",
       Number(b.curOrders) || 0,
       Number(b.expOrders) || 0,
+      startStage,
       addDays(today, 1),
       req.user.name,
     ],
@@ -79,9 +116,11 @@ router.post("/:id/activities", async (req, res) => {
     args: [lead.id, today, req.user.name, type || "", outcome || "", summary.trim(), (nextAction || "").trim(), nextDate || ""],
   });
 
+  const newStage = stageForOutcome(lead.stage, outcome);
+
   await db.execute({
-    sql: `UPDATE leads SET last_contact = ?, next_followup = COALESCE(NULLIF(?, ''), next_followup) WHERE id = ?`,
-    args: [today, nextDate || "", lead.id],
+    sql: `UPDATE leads SET last_contact = ?, next_followup = COALESCE(NULLIF(?, ''), next_followup), stage = COALESCE(?, stage) WHERE id = ?`,
+    args: [today, nextDate || "", newStage, lead.id],
   });
 
   const [activityRes, updatedLead] = await Promise.all([
@@ -110,7 +149,11 @@ router.post("/:id/touch", async (req, res) => {
           VALUES (?, ?, ?, 'Other', 'Connected', 'Marked as contacted — fire alarm cleared.', '', '')`,
     args: [lead.id, today, req.user.name],
   });
-  await db.execute({ sql: "UPDATE leads SET last_contact = ? WHERE id = ?", args: [today, lead.id] });
+  const touchStage = stageForOutcome(lead.stage, "Connected");
+  await db.execute({
+    sql: "UPDATE leads SET last_contact = ?, stage = COALESCE(?, stage) WHERE id = ?",
+    args: [today, touchStage, lead.id],
+  });
 
   const [activityRes, updatedLead] = await Promise.all([
     db.execute({ sql: "SELECT * FROM activities WHERE lead_id = ? ORDER BY id DESC LIMIT 1", args: [lead.id] }),
